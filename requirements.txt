@@ -1,0 +1,10 @@
+# Core data ingestion
+yfinance>=0.2.40
+requests>=2.31.0
+pandas>=2.0.0
+
+# Testing
+pytest>=8.0.0
+
+# Environment variable loading (optional convenience)
+python-dotenv>=1.0.0

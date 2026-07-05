@@ -1,0 +1,210 @@
+"""SQLite data-access layer for FinSent.
+
+This module owns the schema and every read/write against the database. Keeping
+all SQL in one place (a lightweight repository pattern) means the ingestion
+scripts, the future API, and the tests all share one consistent interface.
+
+Schema overview
+---------------
+tickers    : the stock universe we track (symbol is the primary key)
+prices     : daily OHLCV bars, one row per (symbol, date)
+headlines  : news headlines, deduplicated, with nullable sentiment columns
+             that Phase 2 (the FinBERT scorer) will populate.
+"""
+from __future__ import annotations
+
+import hashlib
+import sqlite3
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Iterable, Iterator, Optional
+
+from config import DB_PATH
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS tickers (
+    symbol     TEXT PRIMARY KEY,
+    name       TEXT NOT NULL,
+    sector     TEXT NOT NULL,
+    added_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS prices (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol    TEXT NOT NULL REFERENCES tickers(symbol),
+    date      TEXT NOT NULL,            -- ISO date, e.g. 2027-01-15
+    open      REAL,
+    high      REAL,
+    low       REAL,
+    close     REAL,
+    adj_close REAL,
+    volume    INTEGER,
+    UNIQUE (symbol, date)
+);
+
+CREATE TABLE IF NOT EXISTS headlines (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol               TEXT NOT NULL REFERENCES tickers(symbol),
+    headline             TEXT NOT NULL,
+    source               TEXT,
+    url                  TEXT,
+    published_at         TEXT NOT NULL,   -- ISO datetime
+    fetched_at           TEXT NOT NULL DEFAULT (datetime('now')),
+    dedup_hash           TEXT NOT NULL,   -- sha1(symbol|headline|published_at)
+    -- Populated later by the Phase 2 sentiment pipeline:
+    sentiment_label      TEXT,            -- positive | negative | neutral
+    sentiment_score      REAL,            -- signed score in [-1, 1]
+    sentiment_confidence REAL,            -- model confidence in [0, 1]
+    UNIQUE (dedup_hash)
+);
+
+CREATE INDEX IF NOT EXISTS idx_prices_symbol_date
+    ON prices (symbol, date);
+CREATE INDEX IF NOT EXISTS idx_headlines_symbol_pub
+    ON headlines (symbol, published_at);
+"""
+
+
+# ---------------------------------------------------------------------------
+# Connection management
+# ---------------------------------------------------------------------------
+@contextmanager
+def get_connection(db_path: Path | str = DB_PATH) -> Iterator[sqlite3.Connection]:
+    """Yield a SQLite connection with foreign keys on and Row access.
+
+    Commits on success, rolls back on error, and always closes the handle.
+    """
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON;")
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_db(db_path: Path | str = DB_PATH) -> None:
+    """Create all tables and indexes if they do not already exist."""
+    with get_connection(db_path) as conn:
+        conn.executescript(SCHEMA)
+
+
+# ---------------------------------------------------------------------------
+# Writes
+# ---------------------------------------------------------------------------
+def upsert_tickers(rows: Iterable[tuple[str, str, str]], db_path: Path | str = DB_PATH) -> int:
+    """Insert or update ticker rows. Each row is (symbol, name, sector).
+
+    Returns the number of rows written.
+    """
+    rows = list(rows)
+    with get_connection(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO tickers (symbol, name, sector)
+            VALUES (?, ?, ?)
+            ON CONFLICT(symbol) DO UPDATE SET
+                name = excluded.name,
+                sector = excluded.sector
+            """,
+            rows,
+        )
+    return len(rows)
+
+
+def upsert_prices(rows: Iterable[dict], db_path: Path | str = DB_PATH) -> int:
+    """Insert daily price bars, ignoring duplicates on (symbol, date).
+
+    Each row is a dict with keys: symbol, date, open, high, low, close,
+    adj_close, volume. Returns the number of newly inserted rows.
+    """
+    rows = list(rows)
+    if not rows:
+        return 0
+    with get_connection(db_path) as conn:
+        before = conn.total_changes
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO prices
+                (symbol, date, open, high, low, close, adj_close, volume)
+            VALUES
+                (:symbol, :date, :open, :high, :low, :close, :adj_close, :volume)
+            """,
+            rows,
+        )
+        return conn.total_changes - before
+
+
+def _dedup_hash(symbol: str, headline: str, published_at: str) -> str:
+    key = f"{symbol}|{headline}|{published_at}".encode("utf-8")
+    return hashlib.sha1(key).hexdigest()
+
+
+def upsert_headlines(rows: Iterable[dict], db_path: Path | str = DB_PATH) -> int:
+    """Insert news headlines, deduplicating on a content hash.
+
+    Each row is a dict with keys: symbol, headline, source, url, published_at.
+    Returns the number of newly inserted (non-duplicate) rows.
+    """
+    prepared = []
+    for r in rows:
+        prepared.append(
+            {
+                **r,
+                "dedup_hash": _dedup_hash(
+                    r["symbol"], r["headline"], r["published_at"]
+                ),
+            }
+        )
+    if not prepared:
+        return 0
+    with get_connection(db_path) as conn:
+        before = conn.total_changes
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO headlines
+                (symbol, headline, source, url, published_at, dedup_hash)
+            VALUES
+                (:symbol, :headline, :source, :url, :published_at, :dedup_hash)
+            """,
+            prepared,
+        )
+        return conn.total_changes - before
+
+
+# ---------------------------------------------------------------------------
+# Reads
+# ---------------------------------------------------------------------------
+def count_rows(table: str, db_path: Path | str = DB_PATH) -> int:
+    """Return the number of rows in a table. Table name is validated."""
+    if table not in {"tickers", "prices", "headlines"}:
+        raise ValueError(f"Unknown table: {table}")
+    with get_connection(db_path) as conn:
+        cur = conn.execute(f"SELECT COUNT(*) AS n FROM {table}")
+        return int(cur.fetchone()["n"])
+
+
+def get_prices(symbol: str, db_path: Path | str = DB_PATH) -> list[sqlite3.Row]:
+    """Return all price bars for a symbol, oldest first."""
+    with get_connection(db_path) as conn:
+        cur = conn.execute(
+            "SELECT * FROM prices WHERE symbol = ? ORDER BY date ASC", (symbol,)
+        )
+        return cur.fetchall()
+
+
+def get_headlines(
+    symbol: str, limit: Optional[int] = None, db_path: Path | str = DB_PATH
+) -> list[sqlite3.Row]:
+    """Return headlines for a symbol, newest first, optionally limited."""
+    sql = "SELECT * FROM headlines WHERE symbol = ? ORDER BY published_at DESC"
+    params: tuple = (symbol,)
+    if limit is not None:
+        sql += " LIMIT ?"
+        params = (symbol, limit)
+    with get_connection(db_path) as conn:
+        return conn.execute(sql, params).fetchall()
