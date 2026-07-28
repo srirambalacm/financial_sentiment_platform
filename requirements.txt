@@ -3,8 +3,13 @@ yfinance>=0.2.40
 requests>=2.31.0
 pandas>=2.0.0
 
+# ML core (Phase 2): FinBERT scoring + benchmark
+torch>=2.0.0
+transformers>=4.40.0
+scikit-learn>=1.3.0
+
 # Testing
 pytest>=8.0.0
 
-# Environment variable loading (optional convenience)
+# Environment variable loading
 python-dotenv>=1.0.0

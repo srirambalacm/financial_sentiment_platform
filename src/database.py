@@ -208,3 +208,49 @@ def get_headlines(
         params = (symbol, limit)
     with get_connection(db_path) as conn:
         return conn.execute(sql, params).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Sentiment (Phase 2)
+# ---------------------------------------------------------------------------
+def get_unscored_headlines(
+    limit: Optional[int] = None, db_path: Path | str = DB_PATH
+) -> list[sqlite3.Row]:
+    """Return headlines that have not yet been scored (sentiment is NULL).
+
+    Ordered by id so scoring runs are deterministic and resumable: if a run
+    is interrupted, the next run simply picks up the still-unscored rows.
+    """
+    sql = "SELECT id, headline FROM headlines WHERE sentiment_label IS NULL ORDER BY id"
+    params: tuple = ()
+    if limit is not None:
+        sql += " LIMIT ?"
+        params = (limit,)
+    with get_connection(db_path) as conn:
+        return conn.execute(sql, params).fetchall()
+
+
+def update_sentiment(
+    updates: Iterable[tuple[str, float, float, int]], db_path: Path | str = DB_PATH
+) -> int:
+    """Write sentiment results back to headlines.
+
+    Each update is a tuple of (label, score, confidence, headline_id).
+    Returns the number of rows updated.
+    """
+    updates = list(updates)
+    if not updates:
+        return 0
+    with get_connection(db_path) as conn:
+        before = conn.total_changes
+        conn.executemany(
+            """
+            UPDATE headlines
+               SET sentiment_label = ?,
+                   sentiment_score = ?,
+                   sentiment_confidence = ?
+             WHERE id = ?
+            """,
+            updates,
+        )
+        return conn.total_changes - before
