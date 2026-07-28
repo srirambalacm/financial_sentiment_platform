@@ -38,7 +38,12 @@ FINNHUB_API_KEY = os.getenv("FINNHUB_API_KEY", "")
 PRICE_LOOKBACK_DAYS = int(os.getenv("FINSENT_PRICE_LOOKBACK_DAYS", "365"))
 
 # How many days of news to request per ticker (Finnhub caps free-tier history).
-NEWS_LOOKBACK_DAYS = int(os.getenv("FINSENT_NEWS_LOOKBACK_DAYS", "30"))
+NEWS_LOOKBACK_DAYS = int(os.getenv("FINSENT_NEWS_LOOKBACK_DAYS", "365"))
+
+# Finnhub caps each company-news response at ~250 items and returns the most
+# recent ones, so a single wide request leaves most of the timeline empty.
+# We page through history in chunks of this many days, one request per chunk.
+NEWS_CHUNK_DAYS = int(os.getenv("FINSENT_NEWS_CHUNK_DAYS", "14"))
 
 # Polite delay (seconds) between external API calls to respect rate limits.
 REQUEST_DELAY_SECONDS = float(os.getenv("FINSENT_REQUEST_DELAY", "1.0"))

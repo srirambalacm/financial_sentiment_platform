@@ -1,114 +1,204 @@
 # FinSent — Financial News Sentiment Signal Platform
 
-A full-stack platform that ingests financial news, scores it with a transformer
-model (FinBERT), and backtests whether news sentiment predicts price movement.
+An end-to-end pipeline that ingests a year of financial news, scores it with a
+transformer model, and rigorously tests whether the resulting sentiment signal
+predicts equity returns.
 
-> **Status:** Phase 1 of 5 — Data Foundation ✅
+**Headline finding: it does not.** Over 246 trading sessions and 120K
+headlines, the signal's information coefficient is **-0.006 (p = 0.63)** —
+statistically indistinguishable from zero. That negative result is the
+project's main output, and the evaluation machinery built to establish it
+credibly is the point.
 
 ---
 
 ## Problem
 
-Thousands of financial headlines are published every day. Retail investors have
-no practical way to quantify how that flood of news relates to actual price
-movement — sentiment is read anecdotally, one headline at a time, with no
-measurement of whether it carries any predictive signal.
+Financial news arrives faster than any human can read it, and "sentiment
+predicts price" is an intuitive, widely repeated claim. It is also rarely
+tested honestly: most public analyses tune parameters until a backtest looks
+profitable, report the in-sample number, and quietly omit transaction costs
+and lookahead controls.
+
+The question this project answers is narrower and more useful: **does news
+sentiment carry measurable predictive information about next-day returns for
+large-cap US equities — and how would you know?**
 
 ## Action
 
-FinSent builds a reproducible pipeline that:
-
-1. **Ingests** daily price data and company news for a curated universe of
-   ~25 large-cap S&P 500 tickers into a normalized SQLite store.
-2. **Scores** each headline with FinBERT and benchmarks the model on the
-   Financial PhraseBank dataset *(Phase 2)*.
-3. **Backtests** a sentiment-driven trading signal against a buy-and-hold
-   baseline, controlling for lookahead bias *(Phase 3)*.
-4. **Serves** the results through a FastAPI backend and a React dashboard
-   *(Phases 4–5)*.
+| Stage | What was built |
+|---|---|
+| **Ingestion** | 120,375 headlines + 6,647 daily OHLCV bars across 25 S&P 500 tickers, ~1 year (Aug 2025 – Jul 2026), into a normalized SQLite store with content-hash deduplication. |
+| **Scoring** | FinBERT (`ProsusAI/finbert`) batch inference over 51,892 headlines, producing a signed sentiment score and confidence per headline. |
+| **Model validation** | Benchmarked FinBERT on the Financial PhraseBank corpus (3,453 human-annotated sentences, 75%-agreement subset). |
+| **Data-quality audit** | Built a relevance filter after discovering the news API tags stories loosely. |
+| **Evaluation** | Cross-sectional information coefficient with significance testing, a dollar-neutral long/short backtest, strict lookahead controls, transaction costs, and a chronological train/test split. |
 
 ## Result
 
-_Benchmark and backtest numbers will be filled in as later phases land._
+**Model quality — FinBERT on Financial PhraseBank (75% agreement, n=3,453):**
 
----
+| Metric | Value |
+|---|---|
+| Accuracy | **94.73%** |
+| Macro F1 | **0.9365** |
+
+Per-class F1: negative 0.918, neutral 0.961, positive 0.931. Macro F1 is
+reported alongside accuracy because the classes are imbalanced (2,146 neutral
+vs 420 negative), and plain accuracy would mask weak minority-class
+performance.
+
+**Data quality — relevance audit:**
+
+Only **37.0%** of headlines (44,554 / 120,375) actually mention the company
+they were tagged to. The news API attaches stories to tickers generously: an
+Entergy story arrived tagged to META, a SpaceX story to ORCL. Per-ticker
+retention ranged from 12.2% (META) to 60.3% (NFLX). This is a measured
+property of the data source, not an estimate.
+
+**Signal quality — the actual finding:**
+
+| Measurement | Value | Interpretation |
+|---|---|---|
+| Information coefficient (full sample, 245 days) | **-0.006** (t = -0.49, p = 0.63) | No predictive information |
+| IC, relevance-filtered | -0.006 (t = -0.46, p = 0.65) | Filtering does not rescue it |
+| IC, held-out test window (98 days) | -0.006 (t = -0.26, p = 0.79) | Confirms out-of-sample |
+| Days with positive IC | 49% | A coin flip |
+
+**Strategy performance — long/short, top-3 vs bottom-3 by sentiment rank:**
+
+| | Return | Sharpe | Vol | Max DD |
+|---|---|---|---|---|
+| In-sample (147 sessions) | +3.19% | 0.34 | 23.8% | -11.6% |
+| **Out-of-sample (98 sessions)** | **-9.36%** | **-1.04** | 22.0% | -11.9% |
+| Buy & hold (same window) | +5.23% | 1.15 | 12.0% | -5.6% |
+
+The in-sample Sharpe of 0.34 was the best of 15 parameter combinations. It did
+not survive contact with held-out data. That decay is the entire reason the
+train/test split exists.
+
+## Why this is the expected result
+
+These 25 tickers are among the most closely watched securities in the world.
+Thousands of professionals with faster data and better models trade these
+headlines within milliseconds of publication. A signal built from a free news
+API, an off-the-shelf model, and daily-frequency data should not find alpha
+there — and if it had, the correct first response would have been to search
+for the bug, not to celebrate.
+
+## How the evaluation avoids fooling itself
+
+Five controls, each of which materially changes the answer:
+
+1. **Lookahead guard.** Day *D*'s sentiment is applied to day *D+1*'s return.
+   Weekend news maps forward to the next session, never backward. Writing the
+   test for this caught a real bug: positions were being aligned to the
+   returns index *before* being shifted, silently discarding the first
+   session's position.
+2. **Chronological train/test split.** Parameters were selected on the first
+   147 sessions and evaluated once on the remaining 98. The split is by date,
+   never random — shuffling time-series rows leaks the future.
+3. **Transaction costs.** 5bps charged on every position change, so a signal
+   that churns daily is penalized for it.
+4. **Cross-sectional ranking.** Replaced an absolute sentiment threshold after
+   diagnosing that it was mis-calibrated per ticker: densely covered mega-caps
+   average toward the corpus mean (+0.03) and never cleared a +0.10 cutoff,
+   producing ~3% market exposure and a meaningless backtest.
+5. **Two-sided validation of the harness itself.** On synthetic data with a
+   planted signal, the pipeline recovers IC ≈ +0.14. On random noise, it
+   reports IC ≈ 0 with p > 0.05. It can find a signal that exists and does not
+   hallucinate one that doesn't.
 
 ## Architecture
 
 ```
-              ┌─────────────┐     ┌──────────────┐
- Yahoo Finance│  yfinance   │     │   Finnhub    │ Company news
-   (prices) ──▶ ingest_prices│    │ ingest_news  ◀── (headlines)
-              └──────┬──────┘     └──────┬───────┘
-                     │                   │
-                     ▼                   ▼
-              ┌──────────────────────────────┐
-              │   SQLite (repository layer)   │
-              │  tickers · prices · headlines │
-              └──────────────────────────────┘
-                     │
-                     ▼  (Phases 2–5)
-        FinBERT scoring → backtest → FastAPI → React dashboard
+  yfinance ──▶ ingest_prices ─┐
+                              ├─▶ SQLite ──▶ FinBERT scorer ──▶ relevance filter
+  Finnhub  ──▶ ingest_news  ──┘   (tickers·prices·headlines)          │
+             (paginated, 27                                            ▼
+              windows/ticker)                    cross-sectional panel (date × ticker)
+                                                                       │
+                                              ┌────────────────────────┴───────┐
+                                              ▼                                ▼
+                                    information coefficient          long/short backtest
+                                    (+ significance test)         (costs, lookahead guard)
 ```
 
-## Data model
+## Engineering notes
 
-| Table       | Purpose                                             |
-|-------------|-----------------------------------------------------|
-| `tickers`   | The tracked stock universe (symbol, name, sector).  |
-| `prices`    | Daily OHLCV bars, unique per `(symbol, date)`.       |
-| `headlines` | Deduplicated news, with nullable sentiment columns the Phase 2 scorer fills in. |
+* **Paginated ingestion.** The news API caps each response at ~250 items and
+  returns the most recent matches, so a single wide request yields headlines
+  clustered in the last few weeks while reporting healthy row counts. The
+  first version of this project hit exactly that trap: 11,579 headlines
+  covering only 35 distinct sessions, which made the training window entirely
+  newsless and every parameter combination return exactly 0.00%. Splitting the
+  range into 27 fortnightly windows per ticker raised coverage from 13% to
+  **92.5%** of the price calendar.
+* **Coverage guard.** The evaluation now refuses to report on a panel whose
+  sessions lack news, rather than silently averaging in zeros.
+* **Resumability.** Ingestion deduplicates on a content hash, scoring only
+  touches unscored rows, and relevance tagging is idempotent — so every stage
+  can be interrupted and re-run without corruption or double-counting.
+* **Lazy model loading.** `torch`/`transformers` are imported on first use, so
+  the 68-test suite runs in ~4 seconds without the ML stack installed.
 
-## Getting started
+## Test suite
+
+68 tests. The load-bearing ones assert properties rather than outputs:
+
+* Random sentiment must produce a statistically insignificant IC.
+* A signal that "predicts" the same day's move must earn nothing after the
+  one-day lag.
+* Ingestion windows must tile the date range with no gaps and no overlaps.
+* Long/short weights must be exactly dollar-neutral.
 
 ```bash
-# 1. Clone and enter the project
-git clone <your-repo-url> && cd finsent
+pytest    # 68 passed
+```
 
-# 2. Create a virtual environment and install deps
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
+## Reproducing
+
+```bash
+python -m venv .venv && .venv\Scripts\activate     # Windows
 pip install -r requirements.txt
+cp .env.example .env                               # add a free Finnhub key
 
-# 3. (Optional, for news) add your free Finnhub key
-cp .env.example .env        # then edit .env and paste your key
-
-# 4. Run the ingest
-python -m scripts.run_ingest --prices-only   # prices only, no key needed
-python -m scripts.run_ingest                 # prices + news (needs key)
+python -m scripts.check_api                        # verify key + history depth
+python -m scripts.run_ingest                       # ~20 min, 675 requests
+python -m scripts.tag_relevance
+python -m scripts.score_headlines --relevant-only  # ~25 min on CPU
+python -m scripts.benchmark_model --config sentences_75agree
+python -m scripts.run_evaluation --relevant-only
 ```
 
-## Running the tests
+## Limitations
 
-```bash
-pytest            # runs the data-layer test suite
-```
-
-## Project layout
-
-```
-finsent/
-├── config.py             # env-driven configuration
-├── src/
-│   ├── tickers.py        # the ticker universe
-│   ├── database.py       # schema + all DB reads/writes (repository layer)
-│   ├── ingest_prices.py  # Yahoo Finance price ingestion
-│   └── ingest_news.py    # Finnhub news ingestion
-├── scripts/
-│   └── run_ingest.py     # end-to-end ingest orchestration
-└── tests/
-    └── test_database.py  # data-layer tests
-```
+* **Daily frequency.** News moves prices in seconds; a daily bar cannot
+  capture intraday reaction. Any real signal likely lives at a horizon this
+  data cannot see.
+* **Headline text only.** Article bodies were not ingested, so the model sees
+  a fraction of the available information.
+* **Relevance filter is precision-oriented.** It matches company aliases and
+  will miss oblique references ("the iPhone maker's supplier"); "visa" also
+  matches travel-visa stories.
+* **Response truncation.** Each 14-day window returns ~245 of a possible ~250
+  items, so the densest news days are likely partially sampled.
+* **Single universe, single period.** 25 large-caps over one year. The result
+  may not generalize to small-caps, other sectors, or other regimes.
+* **Multiple comparisons.** 15 parameter combinations were evaluated in-sample;
+  the reported out-of-sample figure is the single selected configuration.
 
 ## Roadmap
 
-- [x] **Phase 1 — Data foundation:** ingestion pipeline + storage + tests
-- [ ] **Phase 2 — ML core:** FinBERT scoring + PhraseBank benchmark
-- [ ] **Phase 3 — Backtest:** sentiment signal vs. buy-and-hold (Sharpe, returns)
-- [ ] **Phase 4 — API + frontend:** FastAPI endpoints + React dashboard
-- [ ] **Phase 5 — Ship:** deployment + CI + polished docs
+- [x] **Phase 1 — Data foundation:** ingestion, storage, deduplication, tests
+- [x] **Phase 2 — ML core:** FinBERT scoring + PhraseBank benchmark
+- [x] **Phase 3 — Evaluation:** IC, relevance filter, lookahead controls, train/test split, long/short backtest
+- [ ] **Phase 4 — API + dashboard:** FastAPI backend + React frontend
+- [ ] **Phase 5 — Ship:** deployment + CI
 
 ## Disclaimer
 
-This project is a technical and educational exercise in data engineering and
-machine learning. Nothing here is investment advice, and the backtests are
-historical analyses, not predictions of future returns.
+A technical exercise in data engineering, machine learning, and quantitative
+evaluation. Nothing here is investment advice. The backtests are historical
+analyses, and the headline finding is explicitly that the signal studied did
+**not** predict returns.

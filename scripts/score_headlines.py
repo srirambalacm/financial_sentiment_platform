@@ -30,6 +30,16 @@ CHUNK = 256
 def main() -> None:
     parser = argparse.ArgumentParser(description="Score headlines with FinBERT")
     parser.add_argument("--limit", type=int, default=None, help="Max rows to score.")
+    parser.add_argument(
+        "--relevant-only",
+        action="store_true",
+        help=(
+            "Only score headlines that passed the relevance filter. Run "
+            "scripts.tag_relevance first. Saves substantial inference time on "
+            "large corpora, since irrelevant headlines are excluded from the "
+            "signal anyway."
+        ),
+    )
     args = parser.parse_args()
 
     scorer = get_scorer()
@@ -40,7 +50,7 @@ def main() -> None:
         take = CHUNK if remaining is None else min(CHUNK, remaining)
         if take <= 0:
             break
-        rows = get_unscored_headlines(limit=take)
+        rows = get_unscored_headlines(limit=take, relevant_only=args.relevant_only)
         if not rows:
             break
 
@@ -57,6 +67,8 @@ def main() -> None:
             remaining -= written
         logger.info("Scored %d headlines so far...", total_scored)
 
+    if args.relevant_only:
+        logger.info("(Scored relevance-filtered headlines only.)")
     logger.info("Done. Scored %d headlines this run.", total_scored)
     logger.info("Total headlines in DB: %d", count_rows("headlines"))
 

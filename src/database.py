@@ -91,6 +91,19 @@ def init_db(db_path: Path | str = DB_PATH) -> None:
     """Create all tables and indexes if they do not already exist."""
     with get_connection(db_path) as conn:
         conn.executescript(SCHEMA)
+        _migrate(conn)
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Apply additive schema changes to databases created by older versions.
+
+    SQLite has no 'ADD COLUMN IF NOT EXISTS', so we inspect the table first.
+    This keeps existing data intact instead of forcing a rebuild.
+    """
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(headlines)")}
+    if "is_relevant" not in existing:
+        # NULL = not yet evaluated, 1 = mentions the company, 0 = does not.
+        conn.execute("ALTER TABLE headlines ADD COLUMN is_relevant INTEGER")
 
 
 # ---------------------------------------------------------------------------
@@ -214,20 +227,87 @@ def get_headlines(
 # Sentiment (Phase 2)
 # ---------------------------------------------------------------------------
 def get_unscored_headlines(
-    limit: Optional[int] = None, db_path: Path | str = DB_PATH
+    limit: Optional[int] = None,
+    db_path: Path | str = DB_PATH,
+    relevant_only: bool = False,
 ) -> list[sqlite3.Row]:
     """Return headlines that have not yet been scored (sentiment is NULL).
 
     Ordered by id so scoring runs are deterministic and resumable: if a run
     is interrupted, the next run simply picks up the still-unscored rows.
+
+    With `relevant_only`, restricts to headlines that passed the relevance
+    filter — useful for skipping model inference on text that would be
+    filtered out of the signal anyway.
     """
-    sql = "SELECT id, headline FROM headlines WHERE sentiment_label IS NULL ORDER BY id"
+    clause = " AND is_relevant = 1" if relevant_only else ""
+    sql = (
+        "SELECT id, headline FROM headlines "
+        f"WHERE sentiment_label IS NULL{clause} ORDER BY id"
+    )
     params: tuple = ()
     if limit is not None:
         sql += " LIMIT ?"
         params = (limit,)
     with get_connection(db_path) as conn:
         return conn.execute(sql, params).fetchall()
+
+
+def get_headlines_for_relevance(
+    db_path: Path | str = DB_PATH,
+) -> list[sqlite3.Row]:
+    """Return (id, symbol, headline) for every headline, for relevance tagging."""
+    with get_connection(db_path) as conn:
+        return conn.execute(
+            "SELECT id, symbol, headline FROM headlines ORDER BY id"
+        ).fetchall()
+
+
+def update_relevance(
+    updates: Iterable[tuple[int, int]], db_path: Path | str = DB_PATH
+) -> int:
+    """Write relevance flags. Each update is (is_relevant, headline_id)."""
+    updates = list(updates)
+    if not updates:
+        return 0
+    with get_connection(db_path) as conn:
+        before = conn.total_changes
+        conn.executemany(
+            "UPDATE headlines SET is_relevant = ? WHERE id = ?", updates
+        )
+        return conn.total_changes - before
+
+
+def get_sentiment_by_date(
+    symbol: str,
+    db_path: Path | str = DB_PATH,
+    relevant_only: bool = False,
+) -> list[sqlite3.Row]:
+    """Return per-day aggregated sentiment for one symbol.
+
+    Groups scored headlines by their UTC publication date and returns
+    (date, avg_score, n_headlines) ordered oldest first. The count is
+    returned so callers can compute a properly weighted mean when several
+    news dates are combined into a single trading day.
+
+    With `relevant_only`, headlines that failed the relevance filter are
+    excluded (rows never tagged are treated as not relevant).
+    """
+    clause = " AND is_relevant = 1" if relevant_only else ""
+    with get_connection(db_path) as conn:
+        return conn.execute(
+            f"""
+            SELECT substr(published_at, 1, 10) AS date,
+                   AVG(sentiment_score)        AS avg_score,
+                   COUNT(*)                    AS n_headlines
+              FROM headlines
+             WHERE symbol = ?
+               AND sentiment_label IS NOT NULL{clause}
+             GROUP BY date
+             ORDER BY date ASC
+            """,
+            (symbol,),
+        ).fetchall()
 
 
 def update_sentiment(
