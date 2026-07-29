@@ -1,0 +1,27 @@
+# Dependencies needed to run the test suite in CI.
+#
+# Deliberately excludes torch (~2GB), transformers, scikit-learn and yfinance.
+# The test suite does not need them:
+#
+#   * src/sentiment.py imports torch and transformers lazily, inside the
+#     function that loads the model, so the module imports fine without them
+#     and the scoring maths is tested by injecting a label map.
+#   * scikit-learn is only used by scripts/benchmark_model.py, which is a
+#     batch job, not importable-under-test code.
+#   * yfinance is only imported by src/ingest_prices.py, exercised through
+#     the network in batch ingestion rather than in tests.
+#
+# The result is a CI install of a few seconds instead of several minutes.
+# Use requirements.txt for a full local environment.
+
+pandas>=2.0.0
+numpy>=1.24.0
+scipy>=1.10.0
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+
+pytest>=8.0.0
+httpx>=0.27.0

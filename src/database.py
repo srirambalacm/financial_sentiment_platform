@@ -69,12 +69,19 @@ CREATE INDEX IF NOT EXISTS idx_headlines_symbol_pub
 # Connection management
 # ---------------------------------------------------------------------------
 @contextmanager
-def get_connection(db_path: Path | str = DB_PATH) -> Iterator[sqlite3.Connection]:
+def get_connection(
+    db_path: Path | str | None = None,
+) -> Iterator[sqlite3.Connection]:
     """Yield a SQLite connection with foreign keys on and Row access.
 
     Commits on success, rolls back on error, and always closes the handle.
+
+    `db_path` is resolved here rather than bound as a default argument, so the
+    module-level DB_PATH is read at call time. That late binding is what lets
+    tests point the whole application at a temporary database by setting one
+    attribute, instead of every caller having to thread a path through.
     """
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path if db_path is not None else DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON;")
     try:
@@ -87,7 +94,7 @@ def get_connection(db_path: Path | str = DB_PATH) -> Iterator[sqlite3.Connection
         conn.close()
 
 
-def init_db(db_path: Path | str = DB_PATH) -> None:
+def init_db(db_path: Path | str | None = None) -> None:
     """Create all tables and indexes if they do not already exist."""
     with get_connection(db_path) as conn:
         conn.executescript(SCHEMA)
@@ -109,7 +116,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 # Writes
 # ---------------------------------------------------------------------------
-def upsert_tickers(rows: Iterable[tuple[str, str, str]], db_path: Path | str = DB_PATH) -> int:
+def upsert_tickers(rows: Iterable[tuple[str, str, str]], db_path: Path | str | None = None) -> int:
     """Insert or update ticker rows. Each row is (symbol, name, sector).
 
     Returns the number of rows written.
@@ -129,7 +136,7 @@ def upsert_tickers(rows: Iterable[tuple[str, str, str]], db_path: Path | str = D
     return len(rows)
 
 
-def upsert_prices(rows: Iterable[dict], db_path: Path | str = DB_PATH) -> int:
+def upsert_prices(rows: Iterable[dict], db_path: Path | str | None = None) -> int:
     """Insert daily price bars, ignoring duplicates on (symbol, date).
 
     Each row is a dict with keys: symbol, date, open, high, low, close,
@@ -157,7 +164,7 @@ def _dedup_hash(symbol: str, headline: str, published_at: str) -> str:
     return hashlib.sha1(key).hexdigest()
 
 
-def upsert_headlines(rows: Iterable[dict], db_path: Path | str = DB_PATH) -> int:
+def upsert_headlines(rows: Iterable[dict], db_path: Path | str | None = None) -> int:
     """Insert news headlines, deduplicating on a content hash.
 
     Each row is a dict with keys: symbol, headline, source, url, published_at.
@@ -192,7 +199,7 @@ def upsert_headlines(rows: Iterable[dict], db_path: Path | str = DB_PATH) -> int
 # ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
-def count_rows(table: str, db_path: Path | str = DB_PATH) -> int:
+def count_rows(table: str, db_path: Path | str | None = None) -> int:
     """Return the number of rows in a table. Table name is validated."""
     if table not in {"tickers", "prices", "headlines"}:
         raise ValueError(f"Unknown table: {table}")
@@ -201,7 +208,7 @@ def count_rows(table: str, db_path: Path | str = DB_PATH) -> int:
         return int(cur.fetchone()["n"])
 
 
-def get_prices(symbol: str, db_path: Path | str = DB_PATH) -> list[sqlite3.Row]:
+def get_prices(symbol: str, db_path: Path | str | None = None) -> list[sqlite3.Row]:
     """Return all price bars for a symbol, oldest first."""
     with get_connection(db_path) as conn:
         cur = conn.execute(
@@ -211,7 +218,7 @@ def get_prices(symbol: str, db_path: Path | str = DB_PATH) -> list[sqlite3.Row]:
 
 
 def get_headlines(
-    symbol: str, limit: Optional[int] = None, db_path: Path | str = DB_PATH
+    symbol: str, limit: Optional[int] = None, db_path: Path | str | None = None
 ) -> list[sqlite3.Row]:
     """Return headlines for a symbol, newest first, optionally limited."""
     sql = "SELECT * FROM headlines WHERE symbol = ? ORDER BY published_at DESC"
@@ -228,7 +235,7 @@ def get_headlines(
 # ---------------------------------------------------------------------------
 def get_unscored_headlines(
     limit: Optional[int] = None,
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
     relevant_only: bool = False,
 ) -> list[sqlite3.Row]:
     """Return headlines that have not yet been scored (sentiment is NULL).
@@ -254,7 +261,7 @@ def get_unscored_headlines(
 
 
 def get_headlines_for_relevance(
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
 ) -> list[sqlite3.Row]:
     """Return (id, symbol, headline) for every headline, for relevance tagging."""
     with get_connection(db_path) as conn:
@@ -264,7 +271,7 @@ def get_headlines_for_relevance(
 
 
 def update_relevance(
-    updates: Iterable[tuple[int, int]], db_path: Path | str = DB_PATH
+    updates: Iterable[tuple[int, int]], db_path: Path | str | None = None
 ) -> int:
     """Write relevance flags. Each update is (is_relevant, headline_id)."""
     updates = list(updates)
@@ -280,7 +287,7 @@ def update_relevance(
 
 def get_sentiment_by_date(
     symbol: str,
-    db_path: Path | str = DB_PATH,
+    db_path: Path | str | None = None,
     relevant_only: bool = False,
 ) -> list[sqlite3.Row]:
     """Return per-day aggregated sentiment for one symbol.
@@ -311,7 +318,7 @@ def get_sentiment_by_date(
 
 
 def update_sentiment(
-    updates: Iterable[tuple[str, float, float, int]], db_path: Path | str = DB_PATH
+    updates: Iterable[tuple[str, float, float, int]], db_path: Path | str | None = None
 ) -> int:
     """Write sentiment results back to headlines.
 

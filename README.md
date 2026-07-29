@@ -144,7 +144,7 @@ Five controls, each of which materially changes the answer:
 
 ## Test suite
 
-68 tests. The load-bearing ones assert properties rather than outputs:
+84 tests. The load-bearing ones assert properties rather than outputs:
 
 * Random sentiment must produce a statistically insignificant IC.
 * A signal that "predicts" the same day's move must earn nothing after the
@@ -153,8 +153,13 @@ Five controls, each of which materially changes the answer:
 * Long/short weights must be exactly dollar-neutral.
 
 ```bash
-pytest    # 68 passed
+pytest    # 84 passed
 ```
+
+CI installs `requirements-ci.txt`, which omits torch, transformers,
+scikit-learn and yfinance. The suite does not need them — `src/sentiment.py`
+imports torch lazily inside the model loader — which cuts the CI install from
+minutes and ~2GB to a few seconds.
 
 ## Reproducing
 
@@ -170,6 +175,34 @@ python -m scripts.score_headlines --relevant-only  # ~25 min on CPU
 python -m scripts.benchmark_model --config sentences_75agree
 python -m scripts.run_evaluation --relevant-only
 ```
+
+## Serving layer
+
+A read-only FastAPI backend exposes the corpus and the evaluation results, and
+a React/TypeScript dashboard renders them.
+
+| Endpoint | Purpose |
+|---|---|
+| `/api/stats` | Corpus counts and sentiment distribution |
+| `/api/tickers` | Universe with scored-headline counts |
+| `/api/tickers/{symbol}/timeseries` | Aligned price and daily sentiment |
+| `/api/tickers/{symbol}/headlines` | Recent scored headlines |
+| `/api/evaluation` | IC, coverage, and out-of-sample performance |
+| `/api/benchmark` | Recorded FinBERT benchmark |
+
+The evaluation endpoint builds the full panel and runs the parameter search —
+**3.5s cold, 2ms cached** (~1,600x), via an in-process TTL cache. The API never
+runs model inference; scoring stays a batch job in `scripts/`, so an HTTP
+handler can never trigger 40K transformer passes.
+
+```bash
+uvicorn api.main:app --reload     # http://127.0.0.1:8000/docs
+cd frontend && npm install && npm run dev
+```
+
+The dashboard leads with the null result rather than burying it, and tags
+headlines that failed the relevance filter as *off-topic* — making the 37%
+retention finding visible rather than merely asserted.
 
 ## Limitations
 
@@ -193,8 +226,8 @@ python -m scripts.run_evaluation --relevant-only
 - [x] **Phase 1 — Data foundation:** ingestion, storage, deduplication, tests
 - [x] **Phase 2 — ML core:** FinBERT scoring + PhraseBank benchmark
 - [x] **Phase 3 — Evaluation:** IC, relevance filter, lookahead controls, train/test split, long/short backtest
-- [ ] **Phase 4 — API + dashboard:** FastAPI backend + React frontend
-- [ ] **Phase 5 — Ship:** deployment + CI
+- [x] **Phase 4 — API + dashboard:** FastAPI backend (cached evaluation endpoint) + React/TypeScript dashboard
+- [x] **Phase 5 — Ship:** GitHub Actions CI + deployment (see `DEPLOYMENT.md`)
 
 ## Disclaimer
 
