@@ -1,3 +1,4 @@
+![CI](https://github.com/srirambalacm/financial_sentiment_platform/actions/workflows/ci.yml/badge.svg)
 # FinSent — Financial News Sentiment Signal Platform
 
 An end-to-end pipeline that ingests a year of financial news, scores it with a
@@ -140,7 +141,7 @@ Five controls, each of which materially changes the answer:
   touches unscored rows, and relevance tagging is idempotent — so every stage
   can be interrupted and re-run without corruption or double-counting.
 * **Lazy model loading.** `torch`/`transformers` are imported on first use, so
-  the 68-test suite runs in ~4 seconds without the ML stack installed.
+  the 84-test suite runs in ~4 seconds without the ML stack installed.
 
 ## Test suite
 
